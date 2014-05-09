@@ -1,4 +1,4 @@
-## mod_rpaf - reverse proxy add forward
+## mod_rpaf - Reverse Proxy Add Forward
 
 ### Summary
 
@@ -7,15 +7,20 @@ Sets `REMOTE_ADDR`, `HTTPS`, and `HTTP_PORT` to the values provided by an upstre
 ### Compile Debian/Ubuntu Package and Install
 
     sudo apt-get install build-essential apache2-threaded-dev yada
-    
+
     # for Ubuntu 12.04 you should install yada manually
     wget http://security.ubuntu.com/ubuntu/pool/universe/y/yada/yada_0.55_all.deb
-    sudo dpkg -i yada_0.55_all.deb 
-    
+    sudo dpkg -i yada_0.55_all.deb
+
     dpkg-buildpackage -b
     sudo dpkg -i ../libapache2-mod-rpaf_X.X-X.X_XXX.deb
 
 ### Compile and Install for RedHat/CentOS
+
+    yum install httpd-devel
+    apxs -i -c -n mod_rpaf.so mod_rpaf.c
+
+or simply try:
 
     yum install httpd-devel
     make
@@ -45,17 +50,30 @@ Sets `REMOTE_ADDR`, `HTTPS`, and `HTTP_PORT` to the values provided by an upstre
 
     LoadModule        rpaf_module modules/mod_rpaf.so
     RPAF_Enable       On
+    RPAF_Header       X-Forwarded-For
     RPAF_ProxyIPs     127.0.0.1 10.0.0.10 10.0.0.20
     RPAF_SetHostName  On
     RPAF_SetHTTPS     On
     RPAF_SetPort      On
-  
+
 ## Authors
 
 * Thomas Eibner <thomas@stderr.net>
+* Takashi Takizawa <taki@cyber.email.ne.jp>
 * Geoffrey McRae <gnif@xbmc.org>
+* Kentaro YOSHIDA <y.ken.studio@gmail.com>
+* Joey Line (https://github.com/firejdl)
+
+## Footnote
+
+This is forked from the following projects.
+
+* http://stderr.net/apache/rpaf/
+* https://github.com/ttkzw/mod_rpaf-0.6
+* https://github.com/gnif/mod_rpaf
+* https://github.com/y-ken/mod_rpaf
 
 ## License and distribution
 
 This software is licensed under the [Apache License 2.0](http://www.apache.org/licenses/LICENSE-2.0). The
-latest version is available [from GitHub](http://github.com/gnif/mod_rpaf)
+latest version is available [from GitHub](http://github.com/firejdl/mod_rpaf)

@@ -1,3 +1,9 @@
+libapache2-mod-rpaf (0.9) unstable; urgency=low
+
+  * Merged in changes from https://github.com/y-ken/mod_rpaf
+
+ -- Joey Line (https://github.com/firejdl)  Fri, 09 May 2014 14:45:42 +1000
+
 libapache2-mod-rpaf (0.8.1-0.1) unstable; urgency=low
 
   * Version bump in the redhat specfile

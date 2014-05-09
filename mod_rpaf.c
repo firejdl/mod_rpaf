@@ -1,5 +1,9 @@
+
 /*
+   Copyright (c) 1995 The Apache Group.  All rights reserved.
    Copyright 2011 Ask Bjørn Hansen
+   Copyright 2012 Kentaro YOSHIDA
+   Copyright 2014 Joey Line
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,14 +18,13 @@
    limitations under the License.
 */
 
-#include "httpd.h"
-#include "http_config.h"
-#include "http_core.h"
-#include "http_log.h"
-#include "http_protocol.h"
-#include "http_vhost.h"
-#include "apr_strings.h"
-
+#include <httpd.h>
+#include <http_config.h>
+#include <http_core.h>
+#include <http_log.h>
+#include <http_protocol.h>
+#include <http_vhost.h>
+#include <apr_strings.h>
 #include <arpa/inet.h>
 
 module AP_MODULE_DECLARE_DATA rpaf_module;
@@ -40,6 +43,7 @@ typedef struct {
 
 typedef struct {
     const char  *old_ip;
+    int         old_family;
     request_rec *r;
 } rpaf_cleanup_rec;
 
@@ -114,52 +118,12 @@ static const char *rpaf_setport(cmd_parms *cmd, void *dummy, int flag) {
     return NULL;
 }
 
-static int check_cidr(apr_pool_t *pool, const char *ipcidr, const char *testip) {
-    char *ip;
-    int cidr_val;
-    unsigned int netmask;
-    char *cidr;
-    /* TODO: this might not be portable.  just use struct in_addr instead? */
-    uint32_t ipval, testipval;
-
-    /* TODO: this iterates once to copy and iterates again to tokenize */
-    ip = apr_pstrdup(pool, ipcidr);
-    cidr = ip;
-    while (*cidr != '\0') {
-        if (*cidr == '/') {
-            *(cidr++) = '\0';
-            break;
-        }
-        cidr++;
-    }
-
-    if (cidr == NULL) {
-        return -1;
-    }
-
-    cidr_val = atoi(cidr);
-    if (cidr_val < 1 || cidr_val > 32) {
-        return -1;
-    }
-
-    netmask = 0xffffffff << (32 - cidr_val);
-    ipval = ntohl(inet_addr(ip));
-    testipval = ntohl(inet_addr(testip));
-
-    return (ipval & netmask) == (testipval & netmask);
-}
-
-static int is_in_array(apr_pool_t *pool, const char *remote_ip, apr_array_header_t *proxy_ips) {
+static int is_in_array(const char *remote_ip, apr_array_header_t *proxy_ips) {
     int i;
     char **list = (char**)proxy_ips->elts;
     for (i = 0; i < proxy_ips->nelts; i++) {
-        if (check_cidr(pool, list[i], remote_ip) == 1) {
+        if (strncmp(remote_ip, list[i], strlen(list[i])) == 0)
             return 1;
-        }
-
-        if (strcmp(remote_ip, list[i]) == 0) {
-            return 1;
-        }
     }
     return 0;
 }
@@ -168,32 +132,20 @@ static apr_status_t rpaf_cleanup(void *data) {
     rpaf_cleanup_rec *rcr = (rpaf_cleanup_rec *)data;
     rcr->r->connection->remote_ip = apr_pstrdup(rcr->r->connection->pool, rcr->old_ip);
     rcr->r->connection->remote_addr->sa.sin.sin_addr.s_addr = apr_inet_addr(rcr->r->connection->remote_ip);
+    rcr->r->connection->remote_addr->sa.sin.sin_family = rcr->old_family;
     return APR_SUCCESS;
-}
-
-static char* last_not_in_array(apr_pool_t *pool,
-                               apr_array_header_t *forwarded_for,
-                               apr_array_header_t *proxy_ips) {
-    int i;
-    for (i = (forwarded_for->nelts)-1; i > 0; i--) {
-        if (!is_in_array(pool, ((char **)forwarded_for->elts)[i], proxy_ips))
-           break;
-    }
-    return ((char **)forwarded_for->elts)[i];
 }
 
 static int change_remote_ip(request_rec *r) {
     const char *fwdvalue;
     char *val;
-    apr_port_t tmpport;
-    apr_pool_t *tmppool;
     rpaf_server_cfg *cfg = (rpaf_server_cfg *)ap_get_module_config(r->server->module_config,
                                                                    &rpaf_module);
 
     if (!cfg->enable)
         return DECLINED;
 
-    if (is_in_array(r->pool, r->connection->remote_ip, cfg->proxy_ips) == 1) {
+    if (is_in_array(r->connection->remote_ip, cfg->proxy_ips) == 1) {
         /* check if cfg->headername is set and if it is use
            that instead of X-Forwarded-For by default */
         if (cfg->headername && (fwdvalue = apr_table_get(r->headers_in, cfg->headername))) {
@@ -213,55 +165,49 @@ static int change_remote_ip(request_rec *r) {
                     ++fwdvalue;
             }
             rcr->old_ip = apr_pstrdup(r->connection->pool, r->connection->remote_ip);
+            rcr->old_family = r->connection->remote_addr->sa.sin.sin_family;
             rcr->r = r;
             apr_pool_cleanup_register(r->pool, (void *)rcr, rpaf_cleanup, apr_pool_cleanup_null);
-            r->connection->remote_ip = apr_pstrdup(r->connection->pool, last_not_in_array(r->pool, arr, cfg->proxy_ips));
+            r->connection->remote_ip = apr_pstrdup(r->connection->pool, ((char **)arr->elts)[((arr->nelts)-1)]);
+            r->connection->remote_addr->sa.sin.sin_addr.s_addr = apr_inet_addr(r->connection->remote_ip);
+            r->connection->remote_addr->family = AF_INET;
+            r->connection->remote_addr->sa.sin.sin_family = AF_INET;
 
-            tmppool = r->connection->remote_addr->pool;
-            tmpport = r->connection->remote_addr->port;
-            memset(r->connection->remote_addr, '\0', sizeof(apr_sockaddr_t));
-            r->connection->remote_addr = NULL;
-            apr_sockaddr_info_get(&(r->connection->remote_addr), r->connection->remote_ip, APR_UNSPEC, tmpport, 0, tmppool);
+
             if (cfg->sethostname) {
                 const char *hostvalue;
-                if ((hostvalue = apr_table_get(r->headers_in, "X-Forwarded-Host")) ||
-                    (hostvalue = apr_table_get(r->headers_in, "X-Host"))) {
-                    apr_array_header_t *arr = apr_array_make(r->pool, 0, sizeof(char*));
-                    while (*hostvalue && (val = ap_get_token(r->pool, &hostvalue, 1))) {
-                        *(char **)apr_array_push(arr) = apr_pstrdup(r->pool, val);
-                        if (*hostvalue != '\0')
-                          ++hostvalue;
-                    }
-
-                    apr_table_set(r->headers_in, "Host", apr_pstrdup(r->pool, ((char **)arr->elts)[((arr->nelts)-1)]));
-                    r->hostname = apr_pstrdup(r->pool, ((char **)arr->elts)[((arr->nelts)-1)]);
+                if ((hostvalue = apr_table_get(r->headers_in, "X-Forwarded-Host"))) {
+                    /* 2.0 proxy frontend or 1.3 => 1.3.25 proxy frontend */
+                    apr_table_set(r->headers_in, "Host", apr_pstrdup(r->pool, hostvalue));
+                    r->hostname = apr_pstrdup(r->pool, hostvalue);
+                    ap_update_vhost_from_headers(r);
+                } else if ((hostvalue = apr_table_get(r->headers_in, "X-Host"))) {
+                    /* 1.3 proxy frontend with mod_proxy_add_forward */
+                    apr_table_set(r->headers_in, "Host", apr_pstrdup(r->pool, hostvalue));
+                    r->hostname = apr_pstrdup(r->pool, hostvalue);
                     ap_update_vhost_from_headers(r);
                 }
             }
-
+            
             if (cfg->sethttps) {
                 const char *httpsvalue;
                 if ((httpsvalue = apr_table_get(r->headers_in, "X-Forwarded-HTTPS")) ||
                     (httpsvalue = apr_table_get(r->headers_in, "X-HTTPS"))) {
                     apr_table_set(r->subprocess_env, "HTTPS", apr_pstrdup(r->pool, httpsvalue));
                     r->server->server_scheme = cfg->https_scheme;
-                } else if ((httpsvalue = apr_table_get(r->headers_in, "X-Forwarded-Proto"))
-                           && (strcmp(httpsvalue, cfg->https_scheme) == 0)) {
+                } else if ((httpsvalue = apr_table_get(r->headers_in, "X-Forwarded-Proto")) != NULL &&
+                    (strcmp(httpsvalue, "https") == 0)) {
                     apr_table_set(r->subprocess_env, "HTTPS", apr_pstrdup(r->pool, "on"));
                     r->server->server_scheme = cfg->https_scheme;
-                } else {
-                    r->server->server_scheme = cfg->orig_scheme;
                 }
             }
-
-             if (cfg->setport) {
+            
+            if (cfg->setport) {
                 const char *portvalue;
                 if ((portvalue = apr_table_get(r->headers_in, "X-Forwarded-Port")) ||
                     (portvalue = apr_table_get(r->headers_in, "X-Port"))) {
                     r->server->port    = atoi(portvalue);
                     r->parsed_uri.port = r->server->port;
-                } else {
-                    r->server->port = cfg->orig_port;
                 }
             }
         }
@@ -278,18 +224,18 @@ static const command_rec rpaf_cmds[] = {
                  "Enable mod_rpaf"
                  ),
     AP_INIT_FLAG(
-                 "RPAF_SetHostName",
+                 "RPAF_SetHostname",
                  rpaf_sethostname,
                  NULL,
                  RSRC_CONF,
-                 "Let mod_rpaf set the hostname from the X-Host header and update vhosts"
+                 "Let mod_rpaf set the hostname from the X-Forwarded-Host or X-Host header and update vhosts"
                  ),
     AP_INIT_FLAG(
                  "RPAF_SetHTTPS",
                  rpaf_sethttps,
                  NULL,
                  RSRC_CONF,
-                 "Let mod_rpaf set the HTTPS environment variable from the X-HTTPS header"
+                 "Let mod_rpaf set the HTTPS environment variable from the X-HTTPS or X-Forwarded-HTTPS or X-Forwarded-Proto header"
                  ),
     AP_INIT_FLAG(
                  "RPAF_SetPort",
